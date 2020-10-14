@@ -35,7 +35,7 @@ const (
 	lockMaintenanceInterval = 30 * time.Second
 
 	// Lock validity check interval.
-	lockValidityCheckInterval = 2 * time.Minute
+	lockValidityCheckInterval = 30 * time.Second
 )
 
 // To abstract a node over network.
@@ -242,8 +242,13 @@ func getLongLivedLocks(interval time.Duration) map[Endpoint][]nameLockRequesterI
 //
 // We will ignore the error, and we will retry later to get a resolve on this lock
 func lockMaintenance(ctx context.Context, interval time.Duration) error {
-	objAPI := newObjectLayerWithoutSafeModeFn()
+	objAPI := newObjectLayerFn()
 	if objAPI == nil {
+		return nil
+	}
+
+	z, ok := objAPI.(*erasureZones)
+	if !ok {
 		return nil
 	}
 
@@ -265,6 +270,8 @@ func lockMaintenance(ctx context.Context, interval time.Duration) error {
 		}
 	}
 
+	allLockersFn := z.GetAllLockers
+
 	// Validate if long lived locks are indeed clean.
 	// Get list of long lived locks to check for staleness.
 	for lendpoint, nlrips := range getLongLivedLocks(interval) {
@@ -273,9 +280,8 @@ func lockMaintenance(ctx context.Context, interval time.Duration) error {
 			// Locks are only held on first zone, make sure that
 			// we only look for ownership of locks from endpoints
 			// on first zone.
-			for _, endpoint := range globalEndpoints[0].Endpoints {
-				c := newLockAPI(endpoint)
-				if !c.IsOnline() {
+			for _, c := range allLockersFn() {
+				if !c.IsOnline() || c == nil {
 					updateNlocks(nlripsMap, nlrip.name, nlrip.lri.Writer)
 					continue
 				}
@@ -292,16 +298,12 @@ func lockMaintenance(ctx context.Context, interval time.Duration) error {
 				cancel()
 				if err != nil {
 					updateNlocks(nlripsMap, nlrip.name, nlrip.lri.Writer)
-					c.Close()
 					continue
 				}
 
 				if !expired {
 					updateNlocks(nlripsMap, nlrip.name, nlrip.lri.Writer)
 				}
-
-				// Close the connection regardless of the call response.
-				c.Close()
 			}
 
 			// Read locks we assume quorum for be N/2 success
@@ -332,7 +334,7 @@ func startLockMaintenance(ctx context.Context) {
 	// no need to start the lock maintenance
 	// if ObjectAPI is not initialized.
 	for {
-		objAPI := newObjectLayerWithoutSafeModeFn()
+		objAPI := newObjectLayerFn()
 		if objAPI == nil {
 			time.Sleep(time.Second)
 			continue

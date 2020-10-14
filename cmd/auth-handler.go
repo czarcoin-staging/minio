@@ -337,7 +337,8 @@ func checkRequestAuthTypeToAccessKey(ctx context.Context, r *http.Request, actio
 		logger.GetReqInfo(ctx).AccessKey = cred.AccessKey
 	}
 
-	if cred.AccessKey == "" {
+	if action != policy.ListAllMyBucketsAction && cred.AccessKey == "" {
+		// Anonymous checks are not meant for ListBuckets action
 		if globalPolicySys.IsAllowed(policy.Args{
 			AccountName:     cred.AccessKey,
 			Action:          action,
@@ -381,6 +382,7 @@ func checkRequestAuthTypeToAccessKey(ctx context.Context, r *http.Request, actio
 		// Request is allowed return the appropriate access key.
 		return cred.AccessKey, owner, ErrNone
 	}
+
 	if action == policy.ListBucketVersionsAction {
 		// In AWS S3 s3:ListBucket permission is same as s3:ListBucketVersions permission
 		// verify as a fallback.

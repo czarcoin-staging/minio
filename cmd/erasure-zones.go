@@ -33,6 +33,7 @@ import (
 	"github.com/minio/minio/cmd/config/storageclass"
 	xhttp "github.com/minio/minio/cmd/http"
 	"github.com/minio/minio/cmd/logger"
+	"github.com/minio/minio/pkg/dsync"
 	"github.com/minio/minio/pkg/madmin"
 	"github.com/minio/minio/pkg/sync/errgroup"
 )
@@ -90,6 +91,10 @@ func newErasureZones(ctx context.Context, endpointZones EndpointZones) (ObjectLa
 
 func (z *erasureZones) NewNSLock(ctx context.Context, bucket string, objects ...string) RWLocker {
 	return z.zones[0].NewNSLock(ctx, bucket, objects...)
+}
+
+func (z *erasureZones) GetAllLockers() []dsync.NetLocker {
+	return z.zones[0].GetAllLockers()
 }
 
 func (z *erasureZones) SetDriveCount() int {
@@ -460,6 +465,10 @@ func (z *erasureZones) MakeBucketWithLocation(ctx context.Context, bucket string
 }
 
 func (z *erasureZones) GetObjectNInfo(ctx context.Context, bucket, object string, rs *HTTPRangeSpec, h http.Header, lockType LockType, opts ObjectOptions) (gr *GetObjectReader, err error) {
+	if err = checkGetObjArgs(ctx, bucket, object); err != nil {
+		return nil, err
+	}
+
 	object = encodeDirObject(object)
 
 	for _, zone := range z.zones {
@@ -479,6 +488,10 @@ func (z *erasureZones) GetObjectNInfo(ctx context.Context, bucket, object string
 }
 
 func (z *erasureZones) GetObject(ctx context.Context, bucket, object string, startOffset int64, length int64, writer io.Writer, etag string, opts ObjectOptions) error {
+	if err := checkGetObjArgs(ctx, bucket, object); err != nil {
+		return err
+	}
+
 	object = encodeDirObject(object)
 
 	for _, zone := range z.zones {
@@ -497,6 +510,10 @@ func (z *erasureZones) GetObject(ctx context.Context, bucket, object string, sta
 }
 
 func (z *erasureZones) GetObjectInfo(ctx context.Context, bucket, object string, opts ObjectOptions) (objInfo ObjectInfo, err error) {
+	if err = checkGetObjArgs(ctx, bucket, object); err != nil {
+		return objInfo, err
+	}
+
 	object = encodeDirObject(object)
 	for _, zone := range z.zones {
 		objInfo, err = zone.GetObjectInfo(ctx, bucket, object, opts)
@@ -517,6 +534,11 @@ func (z *erasureZones) GetObjectInfo(ctx context.Context, bucket, object string,
 
 // PutObject - writes an object to least used erasure zone.
 func (z *erasureZones) PutObject(ctx context.Context, bucket string, object string, data *PutObjReader, opts ObjectOptions) (ObjectInfo, error) {
+	// Validate put object input args.
+	if err := checkPutObjectArgs(ctx, bucket, object, z); err != nil {
+		return ObjectInfo{}, err
+	}
+
 	object = encodeDirObject(object)
 
 	if z.SingleZone() {
@@ -533,6 +555,10 @@ func (z *erasureZones) PutObject(ctx context.Context, bucket string, object stri
 }
 
 func (z *erasureZones) DeleteObject(ctx context.Context, bucket string, object string, opts ObjectOptions) (objInfo ObjectInfo, err error) {
+	if err = checkDelObjArgs(ctx, bucket, object); err != nil {
+		return objInfo, err
+	}
+
 	object = encodeDirObject(object)
 
 	if z.SingleZone() {
@@ -547,6 +573,7 @@ func (z *erasureZones) DeleteObject(ctx context.Context, bucket string, object s
 			break
 		}
 	}
+
 	return objInfo, err
 }
 
@@ -662,7 +689,11 @@ func (z *erasureZones) listObjectsNonSlash(ctx context.Context, bucket, prefix, 
 	for _, zone := range z.zones {
 		zonesEntryChs = append(zonesEntryChs,
 			zone.startMergeWalksN(ctx, bucket, prefix, "", true, endWalkCh, zone.listTolerancePerSet, false))
-		zonesListTolerancePerSet = append(zonesListTolerancePerSet, zone.listTolerancePerSet-2)
+		if zone.listTolerancePerSet == -1 {
+			zonesListTolerancePerSet = append(zonesListTolerancePerSet, zone.setDriveCount/2)
+		} else {
+			zonesListTolerancePerSet = append(zonesListTolerancePerSet, zone.listTolerancePerSet-2)
+		}
 	}
 
 	var objInfos []ObjectInfo
@@ -688,7 +719,7 @@ func (z *erasureZones) listObjectsNonSlash(ctx context.Context, bucket, prefix, 
 		}
 
 		if quorumCount < zonesListTolerancePerSet[zoneIndex] {
-			// Skip entries which are not found on upto ndisks/2.
+			// Skip entries which are not found on upto expected tolerance
 			continue
 		}
 
@@ -784,7 +815,11 @@ func (z *erasureZones) listObjectsSplunk(ctx context.Context, bucket, prefix, ma
 		}
 		zonesEntryChs = append(zonesEntryChs, entryChs)
 		zonesEndWalkCh = append(zonesEndWalkCh, endWalkCh)
-		zonesListTolerancePerSet = append(zonesListTolerancePerSet, zone.listTolerancePerSet-2)
+		if zone.listTolerancePerSet == -1 {
+			zonesListTolerancePerSet = append(zonesListTolerancePerSet, zone.setDriveCount/2)
+		} else {
+			zonesListTolerancePerSet = append(zonesListTolerancePerSet, zone.listTolerancePerSet-2)
+		}
 	}
 
 	entries := mergeZonesEntriesCh(zonesEntryChs, maxKeys, zonesListTolerancePerSet)
@@ -876,7 +911,11 @@ func (z *erasureZones) listObjects(ctx context.Context, bucket, prefix, marker, 
 		}
 		zonesEntryChs = append(zonesEntryChs, entryChs)
 		zonesEndWalkCh = append(zonesEndWalkCh, endWalkCh)
-		zonesListTolerancePerSet = append(zonesListTolerancePerSet, zone.listTolerancePerSet-2)
+		if zone.listTolerancePerSet == -1 {
+			zonesListTolerancePerSet = append(zonesListTolerancePerSet, zone.setDriveCount/2)
+		} else {
+			zonesListTolerancePerSet = append(zonesListTolerancePerSet, zone.listTolerancePerSet-2)
+		}
 	}
 
 	entries := mergeZonesEntriesCh(zonesEntryChs, maxKeys, zonesListTolerancePerSet)
@@ -1278,7 +1317,11 @@ func (z *erasureZones) listObjectVersions(ctx context.Context, bucket, prefix, m
 		}
 		zonesEntryChs = append(zonesEntryChs, entryChs)
 		zonesEndWalkCh = append(zonesEndWalkCh, endWalkCh)
-		zonesListTolerancePerSet = append(zonesListTolerancePerSet, zone.listTolerancePerSet-2)
+		if zone.listTolerancePerSet == -1 {
+			zonesListTolerancePerSet = append(zonesListTolerancePerSet, zone.setDriveCount/2)
+		} else {
+			zonesListTolerancePerSet = append(zonesListTolerancePerSet, zone.listTolerancePerSet-2)
+		}
 	}
 
 	entries := mergeZonesEntriesVersionsCh(zonesEntryChs, maxKeys, zonesListTolerancePerSet)
@@ -1750,9 +1793,13 @@ func (z *erasureZones) Walk(ctx context.Context, bucket, prefix string, results 
 		return err
 	}
 
-	var zoneDrivesPerSet []int
+	zonesListTolerancePerSet := make([]int, 0, len(z.zones))
 	for _, zone := range z.zones {
-		zoneDrivesPerSet = append(zoneDrivesPerSet, zone.listTolerancePerSet-2)
+		if zone.listTolerancePerSet == -1 {
+			zonesListTolerancePerSet = append(zonesListTolerancePerSet, zone.setDriveCount/2)
+		} else {
+			zonesListTolerancePerSet = append(zonesListTolerancePerSet, zone.listTolerancePerSet-2)
+		}
 	}
 
 	if opts.WalkVersions {
@@ -1772,13 +1819,13 @@ func (z *erasureZones) Walk(ctx context.Context, bucket, prefix string, results 
 			defer close(results)
 
 			for {
-				entry, quorumCount, _, ok := lexicallySortedEntryZoneVersions(zonesEntryChs, zonesEntriesInfos, zonesEntriesValid)
+				entry, quorumCount, zoneIdx, ok := lexicallySortedEntryZoneVersions(zonesEntryChs, zonesEntriesInfos, zonesEntriesValid)
 				if !ok {
 					// We have reached EOF across all entryChs, break the loop.
 					return
 				}
 
-				if quorumCount > 0 {
+				if quorumCount >= zonesListTolerancePerSet[zoneIdx] {
 					for _, version := range entry.Versions {
 						results <- version.ToObjectInfo(bucket, version.Name)
 					}
@@ -1805,13 +1852,13 @@ func (z *erasureZones) Walk(ctx context.Context, bucket, prefix string, results 
 		defer close(results)
 
 		for {
-			entry, quorumCount, _, ok := lexicallySortedEntryZone(zonesEntryChs, zonesEntriesInfos, zonesEntriesValid)
+			entry, quorumCount, zoneIdx, ok := lexicallySortedEntryZone(zonesEntryChs, zonesEntriesInfos, zonesEntriesValid)
 			if !ok {
 				// We have reached EOF across all entryChs, break the loop.
 				return
 			}
 
-			if quorumCount > 0 {
+			if quorumCount >= zonesListTolerancePerSet[zoneIdx] {
 				results <- entry.ToObjectInfo(bucket, entry.Name)
 			}
 		}

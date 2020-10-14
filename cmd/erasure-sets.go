@@ -30,10 +30,12 @@ import (
 	"github.com/dchest/siphash"
 	"github.com/google/uuid"
 	"github.com/minio/minio-go/v7/pkg/tags"
+	"github.com/minio/minio/cmd/config"
 	"github.com/minio/minio/cmd/config/storageclass"
 	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/bpool"
 	"github.com/minio/minio/pkg/dsync"
+	"github.com/minio/minio/pkg/env"
 	"github.com/minio/minio/pkg/madmin"
 	"github.com/minio/minio/pkg/sync/errgroup"
 )
@@ -269,10 +271,28 @@ func (s *erasureSets) monitorAndConnectEndpoints(ctx context.Context, monitorInt
 	}
 }
 
+// GetAllLockers return a list of all lockers for all sets.
+func (s *erasureSets) GetAllLockers() []dsync.NetLocker {
+	allLockers := make([]dsync.NetLocker, s.setDriveCount*s.setCount)
+	for i, lockers := range s.erasureLockers {
+		for j, locker := range lockers {
+			allLockers[i*s.setDriveCount+j] = locker
+		}
+	}
+	return allLockers
+}
+
 func (s *erasureSets) GetLockers(setIndex int) func() ([]dsync.NetLocker, string) {
 	return func() ([]dsync.NetLocker, string) {
 		lockers := make([]dsync.NetLocker, s.setDriveCount)
 		copy(lockers, s.erasureLockers[setIndex])
+		sort.Slice(lockers, func(i, j int) bool {
+			// re-order lockers with affinity for
+			// - non-local lockers
+			// - online lockers
+			// are used first
+			return !lockers[i].IsLocal() && lockers[i].IsOnline()
+		})
 		return lockers, s.erasureLockOwner
 	}
 }
@@ -311,6 +331,13 @@ func newErasureSets(ctx context.Context, endpoints Endpoints, storageDisks []Sto
 	setDriveCount := len(format.Erasure.Sets[0])
 
 	endpointStrings := make([]string, len(endpoints))
+
+	listTolerancePerSet := 3
+	// By default this is off
+	if env.Get("MINIO_API_LIST_STRICT_QUORUM", config.EnableOff) == config.EnableOn {
+		listTolerancePerSet = -1
+	}
+
 	// Initialize the erasure sets instance.
 	s := &erasureSets{
 		sets:                make([]*erasureObjects, setCount),
@@ -321,7 +348,7 @@ func newErasureSets(ctx context.Context, endpoints Endpoints, storageDisks []Sto
 		endpointStrings:     endpointStrings,
 		setCount:            setCount,
 		setDriveCount:       setDriveCount,
-		listTolerancePerSet: 3, // Expect 3 good entries across disks.
+		listTolerancePerSet: listTolerancePerSet,
 		format:              format,
 		disksConnectEvent:   make(chan diskConnectInfo),
 		distributionAlgo:    format.Erasure.DistributionAlgo,
