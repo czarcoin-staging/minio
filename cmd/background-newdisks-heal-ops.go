@@ -24,8 +24,8 @@ import (
 	"time"
 
 	"github.com/dustin/go-humanize"
-	"github.com/minio/minio/cmd/logger"
-	"github.com/minio/minio/pkg/console"
+	"github.com/storj/minio/cmd/logger"
+	"github.com/storj/minio/pkg/console"
 )
 
 const (
